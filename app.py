@@ -22,19 +22,24 @@ HTML_TEMPLATE = """
         <h1 class="text-2xl font-bold mb-4 text-cyan-400">JARVIS Dashboard</h1>
         <textarea id="prompt" class="w-full p-3 bg-gray-700 rounded-lg text-white mb-4" rows="4" placeholder="Enter prompt..."></textarea>
         <button onclick="sendPrompt()" class="bg-cyan-500 hover:bg-cyan-600 px-4 py-2 rounded-lg font-bold w-full">Send to AI</button>
-        <p id="response" class="mt-4 text-gray-300 text-sm"></p>
+        <p id="response" class="mt-4 text-gray-300 text-sm whitespace-pre-wrap"></p>
     </div>
     <script>
         async function sendPrompt() {
             const prompt = document.getElementById('prompt').value;
+            document.getElementById('response সন্ত্রাসী text" text-cyan-300">JARVIS is thinking...</p>';
             document.getElementById('response').innerText = "JARVIS is thinking...";
-            const res = await fetch('/api/chat', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({prompt: prompt, target: 'chatgpt'})
-            });
-            const data = await res.json();
-            document.getElementById('response').innerText = data.reply;
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({prompt: prompt, target: 'chatgpt'})
+                });
+                const data = await res.json();
+                document.getElementById('response').innerText = data.reply;
+            } catch (err) {
+                document.getElementById('response').innerText = "Error: " + err;
+            }
         }
     </script>
 </body>
@@ -49,7 +54,6 @@ def index():
 def chat():
     data = request.json
     prompt = data.get("prompt")
-    target = data.get("target", "chatgpt")
     
     with browser_lock:
         try:
@@ -61,15 +65,45 @@ def chat():
                 )
                 page = browser.pages[0] if browser.pages else browser.new_page()
                 
-                if target == "chatgpt":
-                    page.goto("https://chatgpt.com/", timeout=60000)
-                    time.sleep(3)
-                    # Selector logic here based on your working code
+                # Navigate to ChatGPT
+                page.goto("https://chatgpt.com/", timeout=60000)
+                time.sleep(4)
+                
+                # Try finding the chat input box and typing the prompt
+                # (ChatGPT interface uses contenteditable div or textarea)
+                try:
+                    page.fill("div#prompt-textarea", prompt)
+                except:
+                    try:
+                        page.fill("textarea", prompt)
+                    except:
+                        pass
+                
+                time.sleep(1)
+                
+                # Try clicking the send button
+                try:
+                    page.click("button[data-testid='send-button']")
+                except:
+                    pass
+                
+                # Wait for response generation (adjust time as needed)
+                time.sleep(8)
+                
+                # Grab the last response text from ChatGPT container
+                # (Extracts text from message elements)
+                response_text = "Automation triggered successfully, but selectors need fine-tuning based on current ChatGPT UI."
+                try:
+                    messages = page.locator(".whitespace-pre-wrap").all_inner_texts()
+                    if messages:
+                        response_text = messages[-1] # Gets the latest message
+                except Exception as ex:
+                    response_text = f"Typed prompt, but couldn't scrape reply: {str(ex)}"
                 
                 browser.close()
-                return jsonify({"reply": "Automation executed successfully!"})
+                return jsonify({"reply": response_text})
         except Exception as e:
-            return jsonify({"reply": str(e)})
+            return jsonify({"reply": f"Error: {str(e)}"})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
