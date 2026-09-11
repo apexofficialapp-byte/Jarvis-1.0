@@ -1,0 +1,319 @@
+import os
+import time
+import threading
+from flask import Flask, render_template_string, request, jsonify
+from playwright.sync_api import sync_playwright
+
+# Initialize Flask application
+app = Flask(__name__)
+
+# Define the persistent browser user data directory path for the shared master account
+USER_DATA_DIR = os.path.join(os.getcwd(), "shared_ai_browser_profile")
+
+# CRITICAL REQUIREMENT 1: Thread Lock
+# Playwright and SQLite browser profiles cannot handle concurrent page actions or database writes 
+# from multiple threads simultaneously. This lock ensures prompts are processed strictly sequentially.
+browser_lock = threading.Lock()
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI SaaS Shared Bridge (Thread-Safe Pipeline)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: { 500: '#6366f1', 600: '#4f46e5' }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-slate-900 text-slate-100 h-full flex flex-col font-sans">
+    
+    <header class="bg-slate-800 border-b border-slate-700 py-4 px-6 shadow-md flex justify-between items-center">
+        <div class="flex items-center space-x-3">
+            <div class="h-3 w-3 bg-emerald-500 rounded-full animate-pulse"></div>
+            <h1 class="text-xl font-bold tracking-tight text-white">AI Shared Bridge <span class="text-xs font-normal px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">Thread-Safe SaaS</span></h1>
+        </div>
+        <div class="text-xs text-slate-400 flex items-center gap-2">
+            <span>Target Platform:</span>
+            <span id="targetIndicator" class="font-semibold text-slate-200 uppercase bg-slate-700/60 px-2 py-1 rounded">ChatGPT</span>
+        </div>
+    </header>
+
+    <main class="flex-1 max-w-5xl w-full mx-auto p-6 flex flex-col gap-6 overflow-hidden">
+        
+        <!-- Controls & Queue Notice -->
+        <div class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-4 flex flex-wrap gap-4 items-center justify-between backdrop-blur shadow-sm">
+            <div class="flex items-center gap-3">
+                <label for="aiTarget" class="text-sm font-medium text-slate-300">Select AI Master Session:</label>
+                <select id="aiTarget" class="bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500">
+                    <option value="chatgpt">ChatGPT Plus</option>
+                    <option value="gemini">Google Gemini Advanced</option>
+                </select>
+            </div>
+            <div class="text-xs text-slate-400 flex items-center gap-2">
+                <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <span>Requests are automatically queued & processed securely via shared profile.</span>
+            </div>
+        </div>
+
+        <!-- Prompt & Response Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 flex-1 overflow-hidden">
+            
+            <!-- Prompt Input Box -->
+            <div class="bg-slate-800 border border-slate-700 rounded-xl flex flex-col overflow-hidden shadow-lg">
+                <div class="bg-slate-800/80 px-4 py-3 border-b border-slate-700 font-medium text-sm text-slate-200 flex items-center justify-between">
+                    <span>User Prompt Input</span>
+                    <span class="text-xs text-slate-400">Secure & Isolated</span>
+                </div>
+                <div class="p-4 flex-1 flex flex-col">
+                    <textarea id="promptInput" placeholder="Enter your prompt here... (e.g., 'Write a python script for quicksort')" class="flex-1 w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none"></textarea>
+                    <button id="sendBtn" class="mt-4 w-full bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-medium py-2.5 px-4 rounded-lg transition shadow flex items-center justify-center gap-2">
+                        <span>Dispatch to AI Bridge</span>
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- AI Response Output Box -->
+            <div class="bg-slate-800 border border-slate-700 rounded-xl flex flex-col overflow-hidden shadow-lg">
+                <div class="bg-slate-800/80 px-4 py-3 border-b border-slate-700 font-medium text-sm text-slate-200 flex items-center justify-between">
+                    <span>AI SaaS Response Output</span>
+                    <button id="copyBtn" class="text-xs text-emerald-400 hover:text-emerald-300 hidden font-medium">Copy Text</button>
+                </div>
+                <div id="responseContainer" class="p-4 flex-1 overflow-y-auto bg-slate-900/50 text-slate-300 text-sm whitespace-pre-wrap leading-relaxed select-text">
+                    <div class="h-full flex flex-col items-center justify-center text-slate-500 text-center gap-2">
+                        <svg class="w-8 h-8 opacity-40 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                        <p class="text-xs">Ready for dispatch. Awaiting user prompt...</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <script>
+        const sendBtn = document.getElementById('sendBtn');
+        const promptInput = document.getElementById('promptInput');
+        const responseContainer = document.getElementById('responseContainer');
+        const aiTarget = document.getElementById('aiTarget');
+        const copyBtn = document.getElementById('copyBtn');
+        const targetIndicator = document.getElementById('targetIndicator');
+
+        aiTarget.addEventListener('change', (e) => {
+            targetIndicator.textContent = e.target.value === 'chatgpt' ? 'ChatGPT Plus' : 'Gemini Advanced';
+        });
+
+        sendBtn.addEventListener('click', async () => {
+            const prompt = promptInput.value.trim();
+            const target = aiTarget.value;
+
+            if (!prompt) {
+                alert("Prompt cannot be empty.");
+                return;
+            }
+
+            // Set loading state
+            sendBtn.disabled = true;
+            sendBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            responseContainer.innerHTML = `
+                <div class="h-full flex flex-col items-center justify-center text-emerald-400 text-center gap-3">
+                    <svg class="w-8 h-8 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p class="text-sm font-medium">Request queued & dispatched to shared master session...</p>
+                    <p class="text-xs text-slate-500">Please wait while Playwright interacts with the AI platform securely.</p>
+                </div>
+            `;
+            copyBtn.classList.add('hidden');
+
+            try {
+                const res = await fetch('/process', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt, target })
+                });
+
+                const data = await res.json();
+
+                if (data.status === 'success') {
+                    responseContainer.textContent = data.response;
+                    copyBtn.classList.remove('hidden');
+                } else {
+                    responseContainer.innerHTML = `<span class="text-rose-400 font-semibold">Execution Error:</span> ${data.message}`;
+                }
+            } catch (err) {
+                responseContainer.innerHTML = `<span class="text-rose-400 font-semibold">Network Error:</span> ${err.message}`;
+            } finally {
+                sendBtn.disabled = false;
+                sendBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        });
+
+        copyBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(responseContainer.textContent);
+            copyBtn.textContent = 'Copied!';
+            setTimeout(() => { copyBtn.textContent = 'Copy Text'; }, 2000);
+        });
+    </script>
+</body>
+</html>
+"""
+
+@app.route("/")
+def index():
+    """Renders the single-page SaaS frontend dashboard."""
+    return render_template_string(HTML_TEMPLATE)
+
+def execute_playwright_task(prompt, target="chatgpt"):
+    """
+    Core Playwright automation pipeline wrapped inside the thread lock.
+    Navigates to the AI web interface using the shared profile, types prompt,
+    waits for streaming completion, and extracts output text safely.
+    """
+    with sync_playwright() as p:
+        # Launch Chromium with persistent context pointing to the shared master account profile directory.
+        # Set headless=True for production deployment once logged in.
+        browser = p.chromium.launch_persistent_context(
+            user_data_dir=USER_DATA_DIR,
+            headless=True,  
+            args=["--disable-blink-features=AutomationControlled"],
+            viewport={"width": 1280, "height": 800}
+        )
+        
+        page = browser.pages[0] if browser.pages else browser.new_page()
+
+        try:
+            if target == "chatgpt":
+                url = "https://chatgpt.com/"
+                print(f"[*] Navigating to {url}")
+                page.goto(url, timeout=60000)
+                
+                print("[*] Waiting for ChatGPT chat input element...")
+                input_selector = "#prompt-textarea, textarea[placeholder*='Message'], div[contenteditable='true']"
+                page.waitForSelector(input_selector, timeout=30000)
+                
+                print("[*] Typing prompt...")
+                page.fill(input_selector, prompt)
+                time.sleep(0.5)
+                
+                print("[*] Submitting prompt...")
+                send_button_selector = "button[data-testid='send-button'], button[aria-label*='Send']"
+                if page.locator(send_button_selector).count() > 0:
+                    page.click(send_button_selector)
+                else:
+                    page.press(input_selector, "Enter")
+
+                print("[*] Waiting for response generation stream to complete...")
+                time.sleep(3)  # Initial stabilization buffer
+                
+                max_wait = 90
+                start_time = time.time()
+                while time.time() - start_time < max_wait:
+                    stop_btn = page.locator("button[aria-label*='Stop generating'], button[data-testid='stop-button']")
+                    if stop_btn.count() == 0:
+                        time.sleep(2)  # Extra buffer to ensure text is fully rendered
+                        break
+                    time.sleep(1)
+
+                print("[*] Extracting final assistant response...")
+                message_selector = "div[data-message-author-role='assistant'], .markdown"
+                messages = page.locator(message_selector)
+                count = messages.count()
+                
+                if count > 0:
+                    response_text = messages.nth(count - 1).inner_text()
+                else:
+                    response_text = page.locator("main").inner_text()
+
+            elif target == "gemini":
+                url = "https://gemini.google.com/"
+                print(f"[*] Navigating to {url}")
+                page.goto(url, timeout=60000)
+                
+                print("[*] Waiting for Gemini input element...")
+                input_selector = "rich-textarea p, div.ql-editor[contenteditable='true'], textarea"
+                page.waitForSelector(input_selector, timeout=30000)
+                
+                print("[*] Typing prompt into Gemini...")
+                page.click(input_selector)
+                page.fill(input_selector, prompt)
+                time.sleep(0.5)
+                
+                print("[*] Submitting prompt...")
+                send_button_selector = "button.send-button, button[aria-label*='Send message']"
+                if page.locator(send_button_selector).count() > 0:
+                    page.click(send_button_selector)
+                else:
+                    page.press(input_selector, "Enter")
+
+                print("[*] Waiting for Gemini response...")
+                time.sleep(5)
+                
+                start_time = time.time()
+                while time.time() - start_time < 90:
+                    loading = page.locator("mat-progress-bar, .loading-indicator")
+                    if loading.count() == 0:
+                        time.sleep(2)
+                        break
+                    time.sleep(1)
+
+                print("[*] Extracting Gemini response text...")
+                response_selector = "model-response .message-content, .response-container"
+                responses = page.locator(response_selector)
+                count = responses.count()
+                
+                if count > 0:
+                    response_text = responses.nth(count - 1).inner_text()
+                else:
+                    response_text = page.locator("main").inner_text()
+            else:
+                raise ValueError(f"Unsupported AI target platform: {target}")
+
+            return {"status": "success", "response": response_text.strip()}
+
+        except Exception as e:
+            print(f"[!] Playwright execution error: {str(e)}")
+            return {"status": "error", "message": str(e)}
+        finally:
+            browser.close()
+
+@app.route("/process", methods=["POST"])
+def process_prompt():
+    """
+    API route receiving user prompt JSON data.
+    Acquires the threading Lock to ensure sequential request queueing against the shared master profile.
+    """
+    data = request.get_json() or {}
+    prompt = data.get("prompt", "").strip()
+    target = data.get("target", "chatgpt")
+
+    if not prompt:
+        return jsonify({"status": "error", "message": "Prompt cannot be empty."}), 400
+
+    print(f"\n[+] Incoming request queued for [{target}]. Waiting for execution lock...")
+    
+    # CRITICAL ENGINEERING GUARD: Acquire thread lock before launching Playwright
+    # This prevents concurrent file locks on the SQLite browser session database and avoids crashes.
+    with browser_lock:
+        print(f"[+] Lock acquired. Processing prompt through shared browser session...")
+        result = execute_playwright_task(prompt, target=target)
+
+    return jsonify(result)
+
+if __name__ == "__main__":
+    print("======================================================")
+    print(" Starting Shared-Session AI SaaS Bridge (Thread-Safe)")
+    print(" Access local SaaS UI at: http://127.0.0.1:5000")
+    print("======================================================")
+    app.run(host="127.0.0.1", port=5000, debug=True)
