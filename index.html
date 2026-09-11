@@ -182,8 +182,6 @@ def execute_playwright_task(prompt, target="chatgpt"):
     waits for streaming completion, and extracts output text safely.
     """
     with sync_playwright() as p:
-        # Launch Chromium with persistent context pointing to the shared master account profile directory.
-        # Set headless=True for production deployment once logged in.
         browser = p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_DIR,
             headless=True,  
@@ -215,14 +213,14 @@ def execute_playwright_task(prompt, target="chatgpt"):
                     page.press(input_selector, "Enter")
 
                 print("[*] Waiting for response generation stream to complete...")
-                time.sleep(3)  # Initial stabilization buffer
+                time.sleep(3)
                 
                 max_wait = 90
                 start_time = time.time()
                 while time.time() - start_time < max_wait:
                     stop_btn = page.locator("button[aria-label*='Stop generating'], button[data-testid='stop-button']")
                     if stop_btn.count() == 0:
-                        time.sleep(2)  # Extra buffer to ensure text is fully rendered
+                        time.sleep(2)
                         break
                     time.sleep(1)
 
@@ -290,10 +288,6 @@ def execute_playwright_task(prompt, target="chatgpt"):
 
 @app.route("/process", methods=["POST"])
 def process_prompt():
-    """
-    API route receiving user prompt JSON data.
-    Acquires the threading Lock to ensure sequential request queueing against the shared master profile.
-    """
     data = request.get_json() or {}
     prompt = data.get("prompt", "").strip()
     target = data.get("target", "chatgpt")
@@ -303,8 +297,6 @@ def process_prompt():
 
     print(f"\n[+] Incoming request queued for [{target}]. Waiting for execution lock...")
     
-    # CRITICAL ENGINEERING GUARD: Acquire thread lock before launching Playwright
-    # This prevents concurrent file locks on the SQLite browser session database and avoids crashes.
     with browser_lock:
         print(f"[+] Lock acquired. Processing prompt through shared browser session...")
         result = execute_playwright_task(prompt, target=target)
